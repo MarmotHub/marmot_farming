@@ -60,20 +60,19 @@ describe('MarmotPool', function () {
 
 
     let pool
+    let timelock
+    let vault
 
     let alpacaFairLaunchAddrees = "0xac2fefDaF83285EA016BE3f5f1fb039eb800F43D"
     let alpacaVault
 
-    beforeEach(async function() {
+    before(async function() {
         [deployer, alice, bob] = await ethers.getSigners()
         deployer.name = 'deployer'
         alice.name = 'alice'
         bob.name = 'bob'
 
-        // const alpacaVault = await ethers.getContractAt('IAlpacaVault', "0xe5ed8148fE4915cE857FC648b9BdEF8Bb9491Fa5");
-        // console.log('alpacaVault', alpacaVault)
-        // console.log('alpacaVault.token', await alpacaVault.token())
-        // console.log('alpacaVault.totalToken', await alpacaVault.totalToken())
+
         const alpacaAddress = "0x354b3a11D5Ea2DA89405173977E271F58bE2897D"
         alpaca = await ethers.getContractAt('contracts/interface/IERC20.sol:IERC20', alpacaAddress)
         const busdAddress = "0x0266693F9Df932aD7dA8a9b44C2129Ce8a87E81f"
@@ -152,7 +151,7 @@ describe('MarmotPool', function () {
         await oracleBTCUSD.setPrice(decimalStr(20000))
         await oracleBNBUSD.setPrice(decimalStr(300))
 
-        pool = await (await ethers.getContractFactory('MarmotPoolAlpaca')).deploy()
+        pool = await (await ethers.getContractFactory('MarmotPool')).deploy()
         await pool.initialize(
             marmot.address,
             decimalStr("10"),
@@ -161,6 +160,14 @@ describe('MarmotPool', function () {
         )
         await pool.setAlpacaFairLaunch(alpacaFairLaunchAddrees)
         await pool.setWrappedNativeAddr(wbnbAddress)
+        await pool.addSwapper(swapperWBNB.address)
+        await pool.addSwapper(swapperBTC.address)
+        await pool.addSwapper(swapperBUSD.address)
+        await pool.addSwapper(swapperALPACA.address)
+
+
+        vault = await (await ethers.getContractFactory("MarmotVault")).deploy(marmot.address)
+        await pool.setVaultAddress(vault.address)
         await marmot.addMinter(pool.address)
         await marmot.transferOwnership(pool.address)
 
@@ -191,44 +198,57 @@ describe('MarmotPool', function () {
 
         for (token of [busd, btc, wbnb, alpaca, marmot]) {
             await token.connect(deployer).approve(pool.address, MAX)
+            await token.connect(alice).approve(pool.address, MAX)
         }
+
+        busd.transfer(alice.address, decimalStr("50"))
+        btc.transfer(alice.address, decimalStr("0.005"))
+
+        timelock = await (await ethers.getContractFactory('Timelock')).deploy(deployer.address, 1*24*3600)
+
+    })
+
+    it('marmot distribution correctly', async function () {
+        await pool.connect(deployer).deposit(0, decimalStr("50"))
+        await pool.connect(alice).deposit(0, decimalStr("50"))
+        expect((await pool.getUserInfo(0, deployer.address)).amount).to.equal(decimalStr("50"))
+        expect((await pool.getUserInfo(0, alice.address)).amount).to.equal(decimalStr("50"))
+        expect((await pool.getPoolInfo(0)).totalShare).to.equal(decimalStr("100"))
+        fastMove(10)
+        console.log('deployer pending', (await pool.connect(deployer).pendingAll()).toString())
+        console.log('alice pending', (await pool.connect(alice).pendingAll()).toString())
+        await pool.connect(deployer).claimAll();
+        await pool.connect(alice).claimAll();
+        console.log('deployer marmot', (await marmot.balanceOf(deployer.address)).toString())
+        console.log('alice marmot', (await marmot.balanceOf(alice.address)).toString())
+
+        await pool.withdraw(0, decimalStr("50"))
+        await pool.connect(alice).withdraw(0, decimalStr("50"))
+        expect((await pool.getPoolInfo(0)).totalShare).to.equal(decimalStr("0"))
 
     })
 
 
-    it('addLiquidity/removeLiquidity work correctly', async function () {
-        console.log('start')
-        console.log(await pool.getPoolLength());
-        //
-        await pool.connect(deployer).deposit(0, decimalStr("100")) //BUSD
-        await pool.connect(deployer).deposit(1, decimalStr("0.01")) //BTC
-        console.log("deployer bnb balance bef", await ethers.provider.getBalance(deployer.address))
-        //"0x53444835EC580000"
-        await pool.connect(deployer).deposit(2, decimalStr("6"), {value: decimalStr("6")}) //WBNB
-        console.log("deployer bnb balance aft", await ethers.provider.getBalance(deployer.address))
-        console.log("fastmove", await fastMove(10));
 
+    it('deposit/withdraw correctly', async function () {
+        expect(await pool.getPoolLength()).to.equal(3)
+        await expect(pool.deposit(2, decimalStr("0.01"))).to.be.revertedWith("MP: baseToken is wNative")
 
-        // console.log('alpaca balance bef', await alpaca.balanceOf(pool.address))
-        // await pool.alpacaHarvest()
-        // console.log('alpaca balance aft', await alpaca.balanceOf(pool.address))
+        await pool.connect(deployer).deposit(2, decimalStr("100"), {value: decimalStr("100")}) //WBNB
+        expect((await pool.getUserInfo(2, deployer.address)).amount).to.equal(decimalStr("100"))
+        expect((await pool.getPoolInfo(2)).totalShare).to.equal(decimalStr("100"))
+        await pool.withdraw(2, decimalStr("100"))
+        expect((await pool.getUserInfo(2, deployer.address)).amount).to.equal(decimalStr("0"))
+        expect((await pool.getPoolInfo(2)).totalShare).to.equal(decimalStr("0"))
+    })
 
-        // console.log("pool busd balance bef", await busd.balanceOf(pool.address))
-        // await pool.connect(deployer).withdraw(0, decimalStr("100"))
-        // console.log("deployer busd balance aft", await busd.balanceOf(deployer.address))
-        // console.log("pool busd balance aft", await busd.balanceOf(pool.address))
-        // console.log('pool alpaca balance aft', await alpaca.balanceOf(pool.address))
-        // await pool.buyBackAndBurn(alpaca.address, swapperALPACA.address)
-
-        console.log("pool bnb balance bef", await ethers.provider.getBalance(pool.address))
-        await pool.connect(deployer).withdraw(2, decimalStr("6"))
-        console.log("deployer bnb balance aft", await ethers.provider.getBalance(deployer.address))
+    it('alpaca interaction', async function () {
+        console.log('alpaca balance bef', await alpaca.balanceOf(pool.address))
+        await pool.alpacaHarvestAll()
+        console.log('alpaca balance aft', await alpaca.balanceOf(pool.address))
+        console.log("pool busd balance aft", await busd.balanceOf(pool.address))
         console.log("pool bnb balance aft", await ethers.provider.getBalance(pool.address))
-        console.log('pool alpaca balance aft', await alpaca.balanceOf(pool.address))
-        // await pool.buyBackAndBurn(alpaca.address, swapperALPACA.address)
-
-
-
+        await pool.buyBackAndBurn(alpaca.address, swapperALPACA.address, 0)
 
     })
 

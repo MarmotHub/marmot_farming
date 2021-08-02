@@ -354,6 +354,7 @@ contract MarmotPool is OwnableUpgradeable {
                 console.log("MMA.deposit native", amount);
             }
             else {
+                require(address(poolInfo.token) != wrappedNativeAddr, "MP: baseToken is wNative");
                 uint256 nativeAmount;
                 (nativeAmount, amount) = _deflationCompatibleSafeTransferFrom(poolInfo.token, user, address(this), amount);
                 userInfo.amount += amount;
@@ -448,6 +449,7 @@ contract MarmotPool is OwnableUpgradeable {
                 }
             }
         }
+        console.log("pendingAll.curBlockNumber", blockNumber());
         return pendingAmount;
     }
 
