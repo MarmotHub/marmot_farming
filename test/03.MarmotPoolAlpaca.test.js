@@ -273,4 +273,11 @@ describe('MarmotPool', function () {
 
     })
 
+    it('check marmot vote', async function () {
+        console.log("deployer marmot", await marmot.balanceOf(deployer.address))
+        console.log("deployer marmot vote", await marmot.getCurrentVotes(deployer.address))
+        console.log("minter", await marmot.getMinter(0), pool.address)
+    })
+
+
 })

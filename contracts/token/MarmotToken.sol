@@ -12,7 +12,7 @@ contract MarmotToken is ERC20("MarmotToken", "MARMOT", 299792458e18), Ownable {
 
   // modifier for mint function
   modifier onlyMinter() {
-    require(isMinter(msg.sender), "caller is not the minter");
+    require(isMinter(msg.sender), "caller is not minter");
         _;
   }
 
@@ -21,17 +21,17 @@ contract MarmotToken is ERC20("MarmotToken", "MARMOT", 299792458e18), Ownable {
     _moveDelegates(address(0), _delegates[_to], _amount);
   }
 
-  function burn(address _account, uint256 _amount) public onlyOwner {
+  function burn(address _account, uint256 _amount) public onlyMinter {
     _burn(_account, _amount);
   }
 
   function addMinter(address _addMinter) public onlyOwner returns (bool) {
-      require(_addMinter != address(0), "MdxToken: _addMinter is the zero address");
+      require(_addMinter != address(0), "MarmotToken: _addMinter is the zero address");
       return EnumerableSet.add(_minters, _addMinter);
   }
 
   function delMinter(address _delMinter) public onlyOwner returns (bool) {
-      require(_delMinter != address(0), "MdxToken: _delMinter is the zero address");
+      require(_delMinter != address(0), "MarmotToken: _delMinter is the zero address");
       return EnumerableSet.remove(_minters, _delMinter);
   }
 
@@ -44,7 +44,7 @@ contract MarmotToken is ERC20("MarmotToken", "MARMOT", 299792458e18), Ownable {
   }
 
   function getMinter(uint256 _index) public view returns (address){
-      require(_index <= getMinterLength() - 1, "MdxToken: index out of bounds");
+      require(_index <= getMinterLength() - 1, "MarmotToken: index out of bounds");
       return EnumerableSet.at(_minters, _index);
   }
 
@@ -132,9 +132,9 @@ contract MarmotToken is ERC20("MarmotToken", "MARMOT", 299792458e18), Ownable {
     bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSeparator, structHash));
 
     address signatory = ecrecover(digest, v, r, s);
-    require(signatory != address(0), "MARMOT::delegateBySig: invalid signature");
-    require(nonce == nonces[signatory]++, "MARMOT::delegateBySig: invalid nonce");
-    require(block.timestamp <= expiry, "MARMOT::delegateBySig: signature expired");
+    require(signatory != address(0), "MarmotToken::delegateBySig: invalid signature");
+    require(nonce == nonces[signatory]++, "MarmotToken::delegateBySig: invalid nonce");
+    require(block.timestamp <= expiry, "MarmotToken::delegateBySig: signature expired");
     return _delegate(signatory, delegatee);
   }
 
@@ -156,7 +156,7 @@ contract MarmotToken is ERC20("MarmotToken", "MARMOT", 299792458e18), Ownable {
     * @return The number of votes the account had as of the given block
     */
   function getPriorVotes(address account, uint256 blockNumber) external view returns (uint256) {
-    require(blockNumber < block.number, "MARMOT::getPriorVotes: not yet determined");
+    require(blockNumber < block.number, "MarmotToken::getPriorVotes: not yet determined");
 
     uint32 nCheckpoints = numCheckpoints[account];
     if (nCheckpoints == 0) {
@@ -229,7 +229,7 @@ contract MarmotToken is ERC20("MarmotToken", "MARMOT", 299792458e18), Ownable {
     uint256 oldVotes,
     uint256 newVotes
   ) internal {
-    uint32 blockNumber = safe32(block.number, "MARMOT::_writeCheckpoint: block number exceeds 32 bits");
+    uint32 blockNumber = safe32(block.number, "MarmotToken::_writeCheckpoint: block number exceeds 32 bits");
 
     if (nCheckpoints > 0 && checkpoints[delegatee][nCheckpoints - 1].fromBlock == blockNumber) {
       checkpoints[delegatee][nCheckpoints - 1].votes = newVotes;

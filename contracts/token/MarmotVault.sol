@@ -36,7 +36,6 @@ contract MarmotVault is Ownable {
         emit ClaimKeyfund(to, amount);
     }
 
-
     function claimDevfund(uint256 amount) external {
         uint256 balance = marmot.balanceOf(address(this));
         require(balance >= amount, "insufficient MARMOT balance");
@@ -44,6 +43,5 @@ contract MarmotVault is Ownable {
         devfundClaimed += amount;
         marmot.transfer(devAddr, amount);
     }
-
 
 }
