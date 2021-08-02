@@ -5,12 +5,12 @@ import "../utils/ERC20.sol";
 import "../utils/Ownable.sol";
 import "../lib/EnumerableSet.sol";
 
-// AlpacaToken with Governance.
+// MarmotToken with Governance.
 contract MarmotToken is ERC20("MarmotToken", "MARMOT", 299792458e18), Ownable {
   using EnumerableSet for EnumerableSet.AddressSet;
   EnumerableSet.AddressSet private _minters;
 
-    // modifier for mint function
+  // modifier for mint function
   modifier onlyMinter() {
     require(isMinter(msg.sender), "caller is not the minter");
         _;
@@ -47,7 +47,6 @@ contract MarmotToken is ERC20("MarmotToken", "MARMOT", 299792458e18), Ownable {
       require(_index <= getMinterLength() - 1, "MdxToken: index out of bounds");
       return EnumerableSet.at(_minters, _index);
   }
-
 
 
 

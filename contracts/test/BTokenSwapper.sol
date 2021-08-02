@@ -107,7 +107,7 @@ abstract contract BTokenSwapper is IBTokenSwapper {
         resultBX = (bx2 - bx1).rescale(decimalsBX, 18);
 
         require(
-            resultBX >= resultB0  * (UONE - maxSlippageRatio) / referencePrice,
+            resultBX * referencePrice >= resultB0  * (UONE - maxSlippageRatio),
             'BTokenSwapper.swapB0ForExactBX: slippage exceeds allowance'
         );
     }

@@ -5,15 +5,20 @@ pragma solidity >=0.8.0 <0.9.0;
 import "../utils/SafeERC20.sol";
 import "../lib/SafeMath.sol";
 import "../interface/IOracle.sol";
+import '../interface/IBTokenSwapper.sol';
+import "../interface/alpaca/IAlpacaVault.sol";
+import "../interface/alpaca/IAlpacaFairLaunch.sol";
+import "../interface/IWETH.sol";
 import "../token/MarmotToken.sol";
 import "hardhat/console.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 
-
-contract MarmotPool is Ownable {
+contract MarmotPool is OwnableUpgradeable {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
 
     uint256 constant ONE = 10**18;
+    uint256 constant FUND_RATIO = 176470588235294144;
 
 
     // Info of each user.
@@ -31,26 +36,32 @@ contract MarmotPool is Ownable {
         address oracleAddress; //staking price contract address
         uint256 accMarmotPerShare;
         uint256 totalShare;    // Total amount of current pool deposit.
+        address alpacaVault;
+        uint256 alpacaPid;
     }
 
     MarmotToken public marmot;
-
     // all pool share main pool
     uint256 public lastRewardBlock;
-
     // marmot token reward per block.
     uint256 public marmotPerBlock0; // for stable coins
     uint256 public marmotPerBlock1; // for crypto natives (BTC ETH BNB)
-
     // Info of each pool.
     PoolInfo[] public poolInfos;
     // Info of each user that stakes staking tokens. pid => userAddress => UserInfo
     mapping(uint256 => mapping(address => UserInfo)) public userInfos;
     // Control mining
-    bool public paused = false;
+    bool public paused;
     // The block number when marmot mining starts.
     uint256 private _startBlock;
-    address private _devAddr;
+    // 15% of token mint to vault address
+    address private _vaultAddr;
+    // Alpaca setting
+    address public alpacaFairLaunch;
+    // WBNB address
+    address public wrappedNativeAddr;
+    // Approved Swappers
+    mapping(address => bool) approvedSwapper;
 
     bool private _mutex;
     modifier _lock_() {
@@ -60,23 +71,47 @@ contract MarmotPool is Ownable {
         _mutex = false;
     }
 
-
     modifier notPause() {
         require(paused == false, "Mining has been suspended");
         _;
     }
 
+    event AddSwapper(address indexed swapperAddress);
+    event RemoveSwapper(address indexed swapperAddress);
     event Deposit(address indexed user, uint256 indexed pid, uint256 amount);
     event Withdraw(address indexed user, uint256 indexed pid, uint256 amount);
     event Claim(address indexed user, uint256 amount);
     event EmergencyWithdraw(address indexed user, uint256 indexed pid, uint256 amount);
 
-    constructor(MarmotToken _marmot, uint256 _marmotPerBlock0, uint256 _marmotPerBlock1, uint256 _startBlock_) public  {
+//    constructor(MarmotToken _marmot, uint256 _marmotPerBlock0, uint256 _marmotPerBlock1, uint256 _startBlock_) public  {
+//        marmot = _marmot;
+//        marmotPerBlock0 = _marmotPerBlock0;
+//        marmotPerBlock1 = _marmotPerBlock1;
+//        _startBlock = _startBlock_;
+//        _devAddr = msg.sender;
+//    }
+
+    function initialize(
+        MarmotToken _marmot,
+        uint256 _marmotPerBlock0,
+        uint256 _marmotPerBlock1,
+        uint256 _startBlock_
+      ) public initializer {
+        OwnableUpgradeable.__Ownable_init();
         marmot = _marmot;
         marmotPerBlock0 = _marmotPerBlock0;
         marmotPerBlock1 = _marmotPerBlock1;
+        paused = false;
         _startBlock = _startBlock_;
-        _devAddr = msg.sender;
+        _vaultAddr = msg.sender;
+      }
+
+    function blockNumber() public view returns (uint256) {
+        return block.number;
+    }
+
+    function timeStamp() public view returns (uint256) {
+        return block.timestamp;
     }
 
     // ============ OWNER FUNCTIONS ========================================
@@ -96,6 +131,35 @@ contract MarmotPool is Ownable {
         marmotPerBlock1 = _marmotPerBlock1;
     }
 
+    function setAlpacaFairLaunch(address _alpacaFairLaunch) external onlyOwner {
+        require(_alpacaFairLaunch != address(0), "MarmotPool: can not set zero address");
+        alpacaFairLaunch = _alpacaFairLaunch;
+    }
+
+    function setWrappedNativeAddr(address _wrappedNativeAddr) external onlyOwner {
+        require(_wrappedNativeAddr != address(0), "wrappedNativeAddr is the zero address");
+        wrappedNativeAddr = _wrappedNativeAddr;
+    }
+
+    function setVaultAddress(address vaultAddress) external onlyOwner {
+        require(vaultAddress != address(0), "devAddress is the zero address");
+        _vaultAddr = vaultAddress;
+    }
+
+    function togglePause() external onlyOwner {
+        paused = !paused;
+    }
+
+    function addSwapper(address swapperAddress) external onlyOwner {
+        approvedSwapper[swapperAddress] = true;
+        emit AddSwapper(swapperAddress);
+    }
+
+    function removeSwapper(address swapperAddress) external onlyOwner {
+        approvedSwapper[swapperAddress] = false;
+        emit RemoveSwapper(swapperAddress);
+    }
+
    // ============ POOL STATUS ========================================
     function getPoolLength() public view returns (uint256) {
         return poolInfos.length;
@@ -109,18 +173,14 @@ contract MarmotPool is Ownable {
         userInfo = userInfos[pid][user];
     }
 
-    function togglePause() public onlyOwner {
-        paused = !paused;
-    }
-
     function getPrice(uint256 pid) public view returns (uint256) {
         address oracleAddress = poolInfos[pid].oracleAddress;
         uint256 oraclePrice = IOracle(oracleAddress).getPrice();
         return oraclePrice;
     }
 
-    function devAddr() external view returns (address) {
-        return _devAddr;
+    function vaultAddr() external view returns (address) {
+        return _vaultAddr;
     }
 
     function startBlock() external view returns (uint256) {
@@ -145,7 +205,7 @@ contract MarmotPool is Ownable {
     }
 
     // ============ POOL SETTINGS ========================================
-    function addPool(address tokenAddress, string memory symbol, uint256 discount, address oracleAddress) public onlyOwner {
+    function addPool(address tokenAddress, string memory symbol, uint256 discount, address oracleAddress, address alpacaVault, uint256 alpacaPid) public onlyOwner {
         require(tokenAddress != address(0), "tokenAddress is the zero address");
         updatePool();
 
@@ -160,14 +220,18 @@ contract MarmotPool is Ownable {
         newPoolInfo.decimal = IERC20(tokenAddress).decimals();
         newPoolInfo.discount = discount;
         newPoolInfo.oracleAddress = oracleAddress;
+        newPoolInfo.alpacaVault = alpacaVault;
+        newPoolInfo.alpacaPid = alpacaPid;
         poolInfos.push(newPoolInfo);
     }
 
-    function setPool(uint256 pid, address tokenAddress, uint256 discount, address oracleAddress) public onlyOwner {
+    function setPool(uint256 pid, address tokenAddress, uint256 discount, address oracleAddress, address alpacaVault, uint256 alpacaPid) public onlyOwner {
         PoolInfo storage poolInfo = poolInfos[pid];
         poolInfo.token = IERC20(tokenAddress);
         poolInfo.discount = discount;
         poolInfo.oracleAddress = oracleAddress;
+        poolInfo.alpacaVault = alpacaVault;
+        poolInfo.alpacaPid = alpacaPid;
     }
 
     function updatePool() internal {
@@ -199,14 +263,75 @@ contract MarmotPool is Ownable {
 
     function getPoolBalance(uint256 _pid) public view returns (uint256){
         PoolInfo memory poolInfo = poolInfos[_pid];
-        uint256 balance = poolInfo.token.balanceOf(address(this));
-        return balance;
+        return poolInfo.totalShare;
     }
 
 
+
+    // ============ ALPACA FUNCTIONS ========================================
+    function alpacaDeposit(uint256 pid, uint256 amount) internal {
+        address alpacaVault = poolInfos[pid].alpacaVault;
+        uint256 alpacaPid = poolInfos[pid].alpacaPid;
+        if (address(poolInfos[pid].token) == wrappedNativeAddr) {
+            console.log("alpacaDeposit.native");
+            (bool success, ) = alpacaVault.call{value: amount}(abi.encodeWithSignature("deposit(uint256)", amount));
+            require(success, "MP: BNB deposit fail");
+        }
+        else {
+            poolInfos[pid].token.safeApprove(alpacaVault, type(uint256).max);
+            IAlpacaVault(alpacaVault).deposit(amount);
+            poolInfos[pid].token.safeApprove(alpacaVault, 0);
+        }
+        uint256 ibAmount = IAlpacaVault(alpacaVault).balanceOf(address(this));
+        IAlpacaVault(alpacaVault).approve(alpacaFairLaunch, type(uint256).max);
+        IAlpacaFairLaunch(alpacaFairLaunch).deposit(address(this), alpacaPid, ibAmount);
+        IAlpacaVault(alpacaVault).approve(alpacaFairLaunch, 0);
+
+    }
+
+    function alpacaWithdraw(uint256 pid, uint256 amount) internal {
+        address alpacaVault = poolInfos[pid].alpacaVault;
+        uint256 alpacaPid = poolInfos[pid].alpacaPid;
+        uint256 share = amount * IAlpacaVault(alpacaVault).totalSupply() / IAlpacaVault(alpacaVault).totalToken();
+        IAlpacaFairLaunch(alpacaFairLaunch).withdraw(address(this), alpacaPid, share);
+        console.log("alpacaWithdraw ibBnb, share", IAlpacaVault(alpacaVault).balanceOf(address(this)), share);
+        IAlpacaVault(alpacaVault).withdraw(share);
+    }
+
+    function alpacaHarvestAll() external {
+        for (uint256 i = 0; i < poolInfos.length; i++) {
+            alpacaHarvest(i);
+        }
+    }
+
+    function alpacaHarvest(uint256 pid) public {
+        PoolInfo storage poolInfo = poolInfos[pid];
+        if (poolInfo.totalShare > 0) {
+            IAlpacaFairLaunch(alpacaFairLaunch).harvest(poolInfo.alpacaPid);
+        }
+    }
+
+    function buyBackAndBurn(address BX, address swapperAddress, uint256 referencePrice) external {
+        require(approvedSwapper[swapperAddress], "MP: invalid swapperAddress");
+        if (BX == wrappedNativeAddr) {
+            console.log("convert to wbnb", address(this).balance);
+            IWETH(wrappedNativeAddr).deposit{value: address(this).balance}();
+        }
+
+        uint256 amount = IERC20(BX).balanceOf(address(this));
+        console.log("buyBackAndBurn.BX amount", amount);
+        IERC20(BX).safeApprove(swapperAddress, type(uint256).max);
+        (uint256 resultB0, uint256 resultBX) = IBTokenSwapper(swapperAddress).swapExactBXForB0(amount, referencePrice);
+        console.log("resultB0, resultBX", resultB0, resultBX);
+        IERC20(BX).safeApprove(swapperAddress, 0);
+
+        marmot.burn(address(this), resultB0);
+        console.log('burn marmot', resultB0);
+    }
+
     // ============ USER INTERACTION ========================================
     // Deposit staking tokens
-    function deposit(uint256 pid, uint256 amount) public _lock_ notPause {
+    function deposit(uint256 pid, uint256 amount) public payable _lock_ notPause {
         updatePool();
         address user = msg.sender;
         PoolInfo storage poolInfo = poolInfos[pid];
@@ -215,22 +340,34 @@ contract MarmotPool is Ownable {
         if (userInfo.amount > 0) {
             uint256 pendingAmount = poolInfo.accMarmotPerShare * userInfo.amount / ONE - userInfo.rewardDebt;
             if (pendingAmount > 0) {
-                marmot.mint(_devAddr, pendingAmount/10);
+                marmot.mint(_vaultAddr, pendingAmount * FUND_RATIO / ONE);
                 marmot.mint(user, pendingAmount);
             }
         }
         if (amount > 0) {
-            amount = _deflationCompatibleSafeTransferFrom(poolInfo.token,user, address(this), amount);
-//            poolInfo.token.transferFrom(user, address(this), amount);
-            userInfo.amount += amount;
-            poolInfo.totalShare += amount;
+            if (msg.value != 0) {
+                require(address(poolInfo.token) == wrappedNativeAddr, "MP: baseToken is not wNative");
+                require(amount == msg.value, "MP: amount != msg.value");
+                userInfo.amount += amount;
+                poolInfo.totalShare += amount;
+                alpacaDeposit(pid, amount);
+                console.log("MMA.deposit native", amount);
+            }
+            else {
+                uint256 nativeAmount;
+                (nativeAmount, amount) = _deflationCompatibleSafeTransferFrom(poolInfo.token, user, address(this), amount);
+                userInfo.amount += amount;
+                poolInfo.totalShare += amount;
+                alpacaDeposit(pid, nativeAmount);
+                console.log("MMA.deposit", amount);
+            }
         }
         userInfo.rewardDebt = poolInfo.accMarmotPerShare * userInfo.amount / ONE;
         emit Deposit(user, pid, amount);
     }
 
     // Withdraw staking tokens
-    function withdraw(uint256 pid, uint256 amount) public _lock_ {
+    function withdraw(uint256 pid, uint256 amount) public _lock_ notPause {
         updatePool();
         address user = msg.sender;
         PoolInfo storage poolInfo = poolInfos[pid];
@@ -240,7 +377,7 @@ contract MarmotPool is Ownable {
         if (userInfo.amount > 0) {
             uint256 pendingAmount = poolInfo.accMarmotPerShare * userInfo.amount / ONE - userInfo.rewardDebt;
             if (pendingAmount > 0) {
-                marmot.mint(_devAddr, pendingAmount/10);
+                marmot.mint(_vaultAddr, pendingAmount * FUND_RATIO / ONE);
                 marmot.mint(user, pendingAmount);
             }
         }
@@ -248,8 +385,12 @@ contract MarmotPool is Ownable {
             userInfo.amount -= amount;
             poolInfo.totalShare -= amount;
             uint256 decimals = poolInfo.token.decimals();
-            poolInfo.token.safeTransfer(user, amount.rescale(18, decimals));
-//            poolInfo.token.transfer(user, amount);
+            alpacaWithdraw(pid, amount.rescale(18, decimals));
+            if (address(poolInfo.token) == wrappedNativeAddr) {
+                payable(user).transfer(amount);
+            } else {
+                poolInfo.token.safeTransfer(user, amount.rescale(18, decimals));
+            }
         }
         userInfo.rewardDebt = poolInfo.accMarmotPerShare * userInfo.amount / ONE;
         emit Withdraw(user, pid, amount);
@@ -268,7 +409,7 @@ contract MarmotPool is Ownable {
                 }
         }
         if (pendingAmount > 0) {
-            marmot.mint(_devAddr, pendingAmount/10);
+            marmot.mint(_vaultAddr, pendingAmount * FUND_RATIO / ONE);
             marmot.mint(user, pendingAmount);
             emit Claim(user, pendingAmount);
         }
@@ -318,6 +459,7 @@ contract MarmotPool is Ownable {
             pendingAmount = poolInfo.accMarmotPerShare * userInfo.amount / ONE - userInfo.rewardDebt;
         }
         uint256 delta = block.number - lastRewardBlock;
+
         if (pid == 0) {
             if (poolInfo.totalShare > 0) {
                 uint256 addMarmotPerShare = marmotPerBlock0 * delta * ONE / poolInfo.totalShare;
@@ -347,29 +489,33 @@ contract MarmotPool is Ownable {
         userInfo.amount = 0;
         userInfo.rewardDebt = 0;
         uint256 decimals = poolInfo.token.decimals();
-        poolInfo.token.safeTransfer(user, amount.rescale(18, decimals));
-//        poolInfo.token.transfer(user, amount);
+        alpacaWithdraw(pid, amount.rescale(18, decimals));
+        if (address(poolInfo.token) == wrappedNativeAddr) {
+                payable(user).transfer(amount);
+            } else {
+                poolInfo.token.safeTransfer(user, amount.rescale(18, decimals));
+        }
         poolInfo.totalShare -= amount;
         emit EmergencyWithdraw(user, pid, amount);
     }
 
 
     function _deflationCompatibleSafeTransferFrom(IERC20 token, address from, address to, uint256 amount)
-        internal returns (uint256) {
+        internal returns (uint256, uint256) {
         uint256 decimals = token.decimals();
         uint256 balance1 = token.balanceOf(to);
         token.safeTransferFrom(from, to, amount.rescale(18, decimals));
         uint256 balance2 = token.balanceOf(to);
-        return (balance2 - balance1).rescale(decimals, 18);
+        return (balance2 - balance1, (balance2 - balance1).rescale(decimals, 18));
     }
 
 
     fallback() external payable {
-        require(msg.sender == address(marmot), "WE_SAVED_YOUR_ETH_:)");
+//        require(msg.sender == address(marmot), "WE_SAVED_YOUR_ETH_:)");
     }
 
     receive() external payable {
-        require(msg.sender == address(marmot), "WE_SAVED_YOUR_ETH_:)");
+//        require(msg.sender == address(marmot), "WE_SAVED_YOUR_ETH_:)");
     }
 
 }
