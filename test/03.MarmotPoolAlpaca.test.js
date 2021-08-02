@@ -168,8 +168,9 @@ describe('MarmotPool', function () {
 
         vault = await (await ethers.getContractFactory("MarmotVault")).deploy(marmot.address)
         await pool.setVaultAddress(vault.address)
-        await marmot.addMinter(pool.address)
+        // await marmot.addMinter(pool.address)
         await marmot.transferOwnership(pool.address)
+        await pool.addMinter(pool.address)
 
         await pool.addPool(
             busd.address,
@@ -229,7 +230,6 @@ describe('MarmotPool', function () {
     })
 
 
-
     it('deposit/withdraw correctly', async function () {
         expect(await pool.getPoolLength()).to.equal(3)
         await expect(pool.deposit(2, decimalStr("0.01"))).to.be.revertedWith("MP: baseToken is wNative")
@@ -252,5 +252,25 @@ describe('MarmotPool', function () {
 
     })
 
+    it('emergency withdraw', async function () {
+        await pool.connect(deployer).deposit(0, decimalStr("50"))
+        await pool.connect(alice).deposit(0, decimalStr("50"))
+        fastMove(10)
+        await pool.emergencyWithdraw(0)
+        await pool.connect(alice).emergencyWithdraw(0)
+        expect((await pool.getUserInfo(0, deployer.address)).amount).to.equal(decimalStr("0"))
+        expect((await pool.getUserInfo(0, alice.address)).amount).to.equal(decimalStr("0"))
+        expect((await busd.balanceOf(alice.address))).to.equal(decimalStr("50"))
+    })
+
+
+    it('pause works correctly', async function () {
+        await pool.connect(deployer).deposit(0, decimalStr("50"))
+        await pool.connect(alice).deposit(0, decimalStr("50"))
+        fastMove(10)
+        await pool.togglePause()
+        await expect(pool.withdraw(0, decimalStr("50"))).to.be.revertedWith("MP: farming suspended")
+
+    })
 
 })

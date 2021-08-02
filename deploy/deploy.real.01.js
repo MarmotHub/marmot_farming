@@ -111,32 +111,14 @@ async function deployMarmotToken() {
     })
 }
 
-
-async function addDeployerToMarmotMinter() {
+async function mintInitialMarmotToken() {
     marmot = await ethers.getContractAt('MarmotToken', deployed_addresses.marmotToken)
     tx = await marmot.addMinter(deployer.address)
     await logTransaction('marmotToken addMinter deployer', tx)
-}
-
-
-async function addPoolToMarmotMinter() {
-    marmot = await ethers.getContractAt('MarmotToken', deployed_addresses.marmotToken)
-    tx = await marmot.addMinter(deployed_addresses.pool)
-    await logTransaction('marmotToken addMinter pool', tx)
-}
-
-
-async function removeDeployerToMarmotMinter() {
-    marmot = await ethers.getContractAt('MarmotToken', deployed_addresses.marmotToken)
-    tx = await marmot.delMinter(deployer.address)
-    await logTransaction('marmotToken removeMinter', tx)
-}
-
-
-async function mintInitialMarmotToken() {
-    marmot = await ethers.getContractAt('MarmotToken', deployed_addresses.marmotToken)
     tx = await marmot.mint(deployer.address, decimalStr("1000000"))
     await logTransaction('marmotToken initial mint', tx)
+    tx = await marmot.delMinter(deployer.address)
+    await logTransaction('marmotToken removeMinter', tx)
 }
 
 
@@ -295,8 +277,21 @@ async function deployPool() {
     await new Promise(resolve => setTimeout(resolve, 30000))
     await hre.run('verify:verify', {
         address: pool.address,
-        constructorArguments: []
+        constructorArguments: [deployed_addresses.marmotToken, decimalStr("8.51"), decimalStr("12.77"), 9885320]
     })
+}
+
+
+async function addPoolToMarmotMinter() {
+    marmot = await ethers.getContractAt('MarmotToken', deployed_addresses.marmotToken)
+    tx = await marmot.addMinter(deployed_addresses.pool)
+    await logTransaction('marmotToken addMinter pool', tx)
+}
+
+async function transferOwnershipToPool() {
+    marmot = await ethers.getContractAt('MarmotToken', deployed_addresses.marmotToken)
+    tx = await marmot.transferOwnership(deployed_addresses.pool)
+    await logTransaction('marmotToken transfer ownership', tx)
 }
 
 async function addSwapperToPool() {
@@ -333,28 +328,6 @@ async function setupPool() {
 
     tx = await pool.setWrappedNativeAddr(addresses.wbnbAddress)
     await logTransaction('set wbnb address to pool', tx)
-}
-
-async function deployTimelock() {
-    timelock = await (await ethers.getContractFactory('Timelock')).deploy(deployer.address, 1*24*60*60)
-    await logTransaction('vault', timelock.deployTransaction)
-    await new Promise(resolve => setTimeout(resolve, 30000))
-    await hre.run('verify:verify', {
-        address: timelock.address,
-        constructorArguments: [deployer.address, 1*24*60*60]
-    })
-}
-
-async function transferOwnershipMarmotToken() {
-    marmot = await ethers.getContractAt('MarmotToken', deployed_addresses.marmotToken)
-    tx = await marmot.transferOwnership(deployed_addresses.timelock)
-    await logTransaction('transfer marmot ownership to timelock', tx)
-}
-
-async function transferOwnershipPool() {
-    pool = await ethers.getContractAt('MarmotPoolAlpaca', deployed_addresses.pool)
-    tx = await pool.transferOwnership(deployed_addresses.timelock)
-    await logTransaction('transfer pool ownership to timelock', tx)
 }
 
 async function addPool() {
@@ -397,12 +370,54 @@ async function addPool() {
     await logTransaction('add eth pool', tx)
 }
 
+async function deployTimelock() {
+    timelock = await (await ethers.getContractFactory('Timelock')).deploy(deployer.address, 1*24*60*60)
+    await logTransaction('vault', timelock.deployTransaction)
+    await new Promise(resolve => setTimeout(resolve, 30000))
+    await hre.run('verify:verify', {
+        address: timelock.address,
+        constructorArguments: [deployer.address, 1*24*60*60]
+    })
+}
+
+async function transferOwnershipToTimelock() {
+    pool = await ethers.getContractAt('MarmotPoolAlpaca', deployed_addresses.pool)
+    tx = await pool.transferOwnership(deployed_addresses.timelock)
+    await logTransaction('pool transfer ownership', tx)
+}
+
+
+
 
 
 async function main() {
     await getNetwork()
     await deployMarmotToken()
-    // await getPairAddress()
+    await mintInitialMarmotToken()
+    await addLiquidityMarmotAndBnb()
+    await getPairAddress()
+
+    await deploySwapperMARMOT_WBNB()
+    await deploySwapperMARMOT_BUSD()
+    await deploySwapperMARMOT_BTC()
+    await deploySwapperMARMOT_ETH()
+    await deploySwapperMARMOT_ALPACA()
+    await deploySymbolOracleBTC()
+    await deploySymbolOracleETH()
+    await deploySymbolOracleBNB()
+    await deployPool()
+
+    await addPoolToMarmotMinter()
+    await transferOwnershipToPool()
+    await addSwapperToPool()
+    await deployVault()
+    await setupPool()
+    await addPool()
+
+    await deployTimelock()
+    await transferOwnershipToTimelock()
+
+
 }
 
 main()

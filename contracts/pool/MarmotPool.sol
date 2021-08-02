@@ -72,7 +72,7 @@ contract MarmotPool is OwnableUpgradeable {
     }
 
     modifier notPause() {
-        require(paused == false, "Mining has been suspended");
+        require(paused == false, "MP: farming suspended");
         _;
     }
 
@@ -480,7 +480,7 @@ contract MarmotPool is OwnableUpgradeable {
 
 
     // Withdraw without caring about rewards. EMERGENCY ONLY.
-    function emergencyWithdraw(uint256 pid) public notPause _lock_ {
+    function emergencyWithdraw(uint256 pid) public _lock_ {
         _emergencyWithdraw(pid, msg.sender);
     }
 
