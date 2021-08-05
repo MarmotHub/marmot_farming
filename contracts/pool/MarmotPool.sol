@@ -10,7 +10,6 @@ import "../interface/alpaca/IAlpacaVault.sol";
 import "../interface/alpaca/IAlpacaFairLaunch.sol";
 import "../interface/IWETH.sol";
 import "../token/MarmotToken.sol";
-import "hardhat/console.sol";
 import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
 
 contract MarmotPool is OwnableUpgradeable {
@@ -83,13 +82,6 @@ contract MarmotPool is OwnableUpgradeable {
     event Claim(address indexed user, uint256 amount);
     event EmergencyWithdraw(address indexed user, uint256 indexed pid, uint256 amount);
 
-//    constructor(MarmotToken _marmot, uint256 _marmotPerBlock0, uint256 _marmotPerBlock1, uint256 _startBlock_) public  {
-//        marmot = _marmot;
-//        marmotPerBlock0 = _marmotPerBlock0;
-//        marmotPerBlock1 = _marmotPerBlock1;
-//        _startBlock = _startBlock_;
-//        _devAddr = msg.sender;
-//    }
 
     function initialize(
         MarmotToken _marmot,
@@ -145,6 +137,7 @@ contract MarmotPool is OwnableUpgradeable {
         require(vaultAddress != address(0), "devAddress is the zero address");
         _vaultAddr = vaultAddress;
     }
+
 
     function togglePause() external onlyOwner {
         paused = !paused;
@@ -256,7 +249,6 @@ contract MarmotPool is OwnableUpgradeable {
                 }
             }
             lastRewardBlock = curBlockNumber;
-            console.log("updatePool.curBlockNumber", curBlockNumber);
         }
     }
 
@@ -273,7 +265,6 @@ contract MarmotPool is OwnableUpgradeable {
         address alpacaVault = poolInfos[pid].alpacaVault;
         uint256 alpacaPid = poolInfos[pid].alpacaPid;
         if (address(poolInfos[pid].token) == wrappedNativeAddr) {
-            console.log("alpacaDeposit.native");
             (bool success, ) = alpacaVault.call{value: amount}(abi.encodeWithSignature("deposit(uint256)", amount));
             require(success, "MP: BNB deposit fail");
         }
@@ -294,7 +285,6 @@ contract MarmotPool is OwnableUpgradeable {
         uint256 alpacaPid = poolInfos[pid].alpacaPid;
         uint256 share = amount * IAlpacaVault(alpacaVault).totalSupply() / IAlpacaVault(alpacaVault).totalToken();
         IAlpacaFairLaunch(alpacaFairLaunch).withdraw(address(this), alpacaPid, share);
-        console.log("alpacaWithdraw ibBnb, share", IAlpacaVault(alpacaVault).balanceOf(address(this)), share);
         IAlpacaVault(alpacaVault).withdraw(share);
     }
 
@@ -314,19 +304,15 @@ contract MarmotPool is OwnableUpgradeable {
     function buyBackAndBurn(address BX, address swapperAddress, uint256 referencePrice) external {
         require(approvedSwapper[swapperAddress], "MP: invalid swapperAddress");
         if (BX == wrappedNativeAddr) {
-            console.log("convert to wbnb", address(this).balance);
             IWETH(wrappedNativeAddr).deposit{value: address(this).balance}();
         }
 
         uint256 amount = IERC20(BX).balanceOf(address(this));
-        console.log("buyBackAndBurn.BX amount", amount);
         IERC20(BX).safeApprove(swapperAddress, type(uint256).max);
-        (uint256 resultB0, uint256 resultBX) = IBTokenSwapper(swapperAddress).swapExactBXForB0(amount, referencePrice);
-        console.log("resultB0, resultBX", resultB0, resultBX);
+        (uint256 resultB0, ) = IBTokenSwapper(swapperAddress).swapExactBXForB0(amount, referencePrice);
         IERC20(BX).safeApprove(swapperAddress, 0);
 
-        marmot.burn(address(this), resultB0);
-        console.log('burn marmot', resultB0);
+        marmot.burn(resultB0);
     }
 
     // ============ USER INTERACTION ========================================
@@ -351,7 +337,6 @@ contract MarmotPool is OwnableUpgradeable {
                 userInfo.amount += amount;
                 poolInfo.totalShare += amount;
                 alpacaDeposit(pid, amount);
-                console.log("MMA.deposit native", amount);
             }
             else {
                 require(address(poolInfo.token) != wrappedNativeAddr, "MP: baseToken is wNative");
@@ -360,7 +345,6 @@ contract MarmotPool is OwnableUpgradeable {
                 userInfo.amount += amount;
                 poolInfo.totalShare += amount;
                 alpacaDeposit(pid, nativeAmount);
-                console.log("MMA.deposit", amount);
             }
         }
         userInfo.rewardDebt = poolInfo.accMarmotPerShare * userInfo.amount / ONE;
@@ -419,60 +403,67 @@ contract MarmotPool is OwnableUpgradeable {
     function pendingAll() view external returns (uint256) {
         address user = msg.sender;
         uint256 pendingAmount;
-        for (uint256 i = 0; i < poolInfos.length; i++) {
+        uint256 preBlockNumber = lastRewardBlock;
+        uint256 curBlockNumber = block.number;
+        if (curBlockNumber > preBlockNumber) {
+            for (uint256 i = 0; i < poolInfos.length; i++) {
+                    PoolInfo memory poolInfo = poolInfos[i];
+                    UserInfo memory userInfo = userInfos[i][user];
+                    if (userInfo.amount > 0) {
+                        pendingAmount += poolInfo.accMarmotPerShare * userInfo.amount / ONE - userInfo.rewardDebt;
+                    }
+            }
+
+            uint256 delta = curBlockNumber - preBlockNumber;
+            uint256 addMarmotPerShare;
+            uint256 totalValue1;
+            if (poolInfos.length >= 1) totalValue1 = getAllPoolValue1();
+
+            for (uint256 i = 0; i < poolInfos.length; i++) {
                 PoolInfo memory poolInfo = poolInfos[i];
                 UserInfo memory userInfo = userInfos[i][user];
-                if (userInfo.amount > 0) {
-                    pendingAmount += poolInfo.accMarmotPerShare * userInfo.amount / ONE - userInfo.rewardDebt;
+                if (i == 0) {
+                    if (poolInfo.totalShare > 0) {
+                        addMarmotPerShare = marmotPerBlock0 * delta * ONE / poolInfo.totalShare;
+                        pendingAmount += addMarmotPerShare * userInfo.amount / ONE;
+                    }
                 }
-        }
-
-        uint256 delta = block.number - lastRewardBlock;
-        uint256 addMarmotPerShare;
-        uint256 totalValue1;
-        if (poolInfos.length >= 1) totalValue1 = getAllPoolValue1();
-
-        for (uint256 i = 0; i < poolInfos.length; i++) {
-            PoolInfo memory poolInfo = poolInfos[i];
-            UserInfo memory userInfo = userInfos[i][user];
-            if (i == 0) {
-                if (poolInfo.totalShare > 0) {
-                    addMarmotPerShare = marmotPerBlock0 * delta * ONE / poolInfo.totalShare;
-                    pendingAmount += addMarmotPerShare * userInfo.amount / ONE;
-                }
-            }
-            else {
-                uint256 value1 = getPoolValue1(i);
-                if (value1 > 0 && totalValue1 >0) {
-                    addMarmotPerShare = value1 * marmotPerBlock1 * delta * ONE / (totalValue1 * poolInfo.totalShare);
-                    pendingAmount += addMarmotPerShare * userInfo.amount / ONE;
+                else {
+                    uint256 value1 = getPoolValue1(i);
+                    if (value1 > 0 && totalValue1 >0) {
+                        addMarmotPerShare = value1 * marmotPerBlock1 * delta * ONE / (totalValue1 * poolInfo.totalShare);
+                        pendingAmount += addMarmotPerShare * userInfo.amount / ONE;
+                    }
                 }
             }
         }
-        console.log("pendingAll.curBlockNumber", blockNumber());
         return pendingAmount;
     }
 
     function pending(uint256 pid, address user) view public returns (uint256) {
-        PoolInfo memory poolInfo = poolInfos[pid];
-        UserInfo memory userInfo = userInfos[pid][user];
+        uint256 preBlockNumber = lastRewardBlock;
+        uint256 curBlockNumber = block.number;
         uint256 pendingAmount;
-        if (userInfo.amount > 0) {
-            pendingAmount = poolInfo.accMarmotPerShare * userInfo.amount / ONE - userInfo.rewardDebt;
-        }
-        uint256 delta = block.number - lastRewardBlock;
-
-        if (pid == 0) {
-            if (poolInfo.totalShare > 0) {
-                uint256 addMarmotPerShare = marmotPerBlock0 * delta * ONE / poolInfo.totalShare;
-                pendingAmount += addMarmotPerShare * userInfo.amount / ONE;
+        if (curBlockNumber > preBlockNumber) {
+            PoolInfo memory poolInfo = poolInfos[pid];
+            UserInfo memory userInfo = userInfos[pid][user];
+            if (userInfo.amount > 0) {
+                pendingAmount = poolInfo.accMarmotPerShare * userInfo.amount / ONE - userInfo.rewardDebt;
             }
-        } else {
-            uint256 totalValue1 = getAllPoolValue1();
-            uint256 value1 = getPoolValue1(pid);
-            if (value1 > 0) {
-                uint256 addMarmotPerShare = value1 * marmotPerBlock1 * delta * ONE / (totalValue1 * poolInfo.totalShare);
-                pendingAmount += addMarmotPerShare * userInfo.amount / ONE;
+
+            uint256 delta = curBlockNumber - preBlockNumber;
+            if (pid == 0) {
+                if (poolInfo.totalShare > 0) {
+                    uint256 addMarmotPerShare = marmotPerBlock0 * delta * ONE / poolInfo.totalShare;
+                    pendingAmount += addMarmotPerShare * userInfo.amount / ONE;
+                }
+            } else {
+                uint256 totalValue1 = getAllPoolValue1();
+                uint256 value1 = getPoolValue1(pid);
+                if (value1 > 0) {
+                    uint256 addMarmotPerShare = value1 * marmotPerBlock1 * delta * ONE / (totalValue1 * poolInfo.totalShare);
+                    pendingAmount += addMarmotPerShare * userInfo.amount / ONE;
+                }
             }
         }
         return pendingAmount;

@@ -21,8 +21,9 @@ contract MarmotToken is ERC20("MarmotToken", "MARMOT", 299792458e18), Ownable {
     _moveDelegates(address(0), _delegates[_to], _amount);
   }
 
-  function burn(address _account, uint256 _amount) public onlyMinter {
-    _burn(_account, _amount);
+
+  function burn(uint256 _amount) public {
+    _burn(msg.sender, _amount);
   }
 
   function addMinter(address _addMinter) public onlyOwner returns (bool) {

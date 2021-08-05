@@ -5,14 +5,21 @@ pragma solidity >=0.8.0 <0.9.0;
 import "../utils/SafeERC20.sol";
 import "../lib/SafeMath.sol";
 import "../interface/IOracle.sol";
+import '../interface/IBTokenSwapper.sol';
+import "../interface/alpaca/IAlpacaVault.sol";
+import "../interface/alpaca/IAlpacaFairLaunch.sol";
+import "../interface/IWETH.sol";
 import "../token/MarmotToken.sol";
+import "@openzeppelin/contracts-upgradeable/access/OwnableUpgradeable.sol";
+import "hardhat/console.sol";
 
-
-contract MarmotPoolSimple is Ownable {
+contract MarmotPoolNaive is OwnableUpgradeable {
     using SafeMath for uint256;
     using SafeERC20 for IERC20;
 
     uint256 constant ONE = 10**18;
+    uint256 constant FUND_RATIO = 176470588235294144;
+
 
     // Info of each user.
     struct UserInfo {
@@ -25,30 +32,27 @@ contract MarmotPoolSimple is Ownable {
         IERC20 token;           // Address of staking token contract.
         string symbol;
         uint256 decimal;
-        uint256 discount;
-        address oracleAddress; //staking price contract address
+        uint256 allocPoint;
         uint256 accMarmotPerShare;
         uint256 totalShare;    // Total amount of current pool deposit.
+        uint256 lastRewardBlock;
     }
 
     MarmotToken public marmot;
-
-    // all pool share main pool
-    uint256 public lastRewardBlock;
-
     // marmot token reward per block.
-    uint256 public marmotPerBlock0; // for stable coins
-    uint256 public marmotPerBlock1; // for crypto natives (BTC ETH BNB)
-
+    uint256 public marmotPerBlock;
+    // total allocPoints
+    uint256 public totalAllocPoints;
     // Info of each pool.
     PoolInfo[] public poolInfos;
     // Info of each user that stakes staking tokens. pid => userAddress => UserInfo
     mapping(uint256 => mapping(address => UserInfo)) public userInfos;
     // Control mining
-    bool public paused = false;
+    bool public paused;
     // The block number when marmot mining starts.
     uint256 private _startBlock;
-    address private _devAddr;
+    // 15% of token mint to vault address
+    address private _vaultAddr;
 
     bool private _mutex;
     modifier _lock_() {
@@ -58,41 +62,56 @@ contract MarmotPoolSimple is Ownable {
         _mutex = false;
     }
 
-
     modifier notPause() {
-        require(paused == false, "Mining has been suspended");
+        require(paused == false, "MP: farming suspended");
         _;
     }
 
+    event AddSwapper(address indexed swapperAddress);
+    event RemoveSwapper(address indexed swapperAddress);
     event Deposit(address indexed user, uint256 indexed pid, uint256 amount);
     event Withdraw(address indexed user, uint256 indexed pid, uint256 amount);
     event Claim(address indexed user, uint256 amount);
     event EmergencyWithdraw(address indexed user, uint256 indexed pid, uint256 amount);
 
-    constructor(MarmotToken _marmot, uint256 _marmotPerBlock0, uint256 _marmotPerBlock1, uint256 _startBlock_) public  {
+
+    function initialize(
+        MarmotToken _marmot,
+        uint256 _marmotPerBlock,
+        uint256 _startBlock_
+      ) public initializer {
+        OwnableUpgradeable.__Ownable_init();
         marmot = _marmot;
-        marmotPerBlock0 = _marmotPerBlock0;
-        marmotPerBlock1 = _marmotPerBlock1;
+        marmotPerBlock = _marmotPerBlock;
+        paused = false;
         _startBlock = _startBlock_;
-        _devAddr = msg.sender;
+        _vaultAddr = msg.sender;
+      }
+
+    function blockNumber() public view returns (uint256) {
+        return block.number;
+    }
+
+    function timeStamp() public view returns (uint256) {
+        return block.timestamp;
     }
 
     // ============ OWNER FUNCTIONS ========================================
-    function addMinter(address _addMinter) external onlyOwner returns (bool) {
-		bool result = marmot.addMinter(_addMinter);
-		return result;
-	}
-
-	function delMinter(address _delMinter) external onlyOwner returns (bool) {
-		bool result = marmot.delMinter(_delMinter);
-		return result;
-	}
-
-    function setMarmotPerBlock(uint256 _marmotPerBlock0, uint256 _marmotPerBlock1) external onlyOwner {
+    function setMarmotPerBlock(uint256 _marmotPerBlock) external onlyOwner {
         updatePool();
-        marmotPerBlock0 = _marmotPerBlock0;
-        marmotPerBlock1 = _marmotPerBlock1;
+        marmotPerBlock = _marmotPerBlock;
     }
+    
+
+    function setVaultAddress(address vaultAddress) external onlyOwner {
+        require(vaultAddress != address(0), "devAddress is the zero address");
+        _vaultAddr = vaultAddress;
+    }
+
+    function togglePause() external onlyOwner {
+        paused = !paused;
+    }
+
 
    // ============ POOL STATUS ========================================
     function getPoolLength() public view returns (uint256) {
@@ -107,104 +126,73 @@ contract MarmotPoolSimple is Ownable {
         userInfo = userInfos[pid][user];
     }
 
-    function togglePause() public onlyOwner {
-        paused = !paused;
-    }
 
-    function getPrice(uint256 pid) public view returns (uint256) {
-        address oracleAddress = poolInfos[pid].oracleAddress;
-        uint256 oraclePrice = IOracle(oracleAddress).getPrice();
-        return oraclePrice;
-    }
-
-    function devAddr() external view returns (address) {
-        return _devAddr;
+    function vaultAddr() external view returns (address) {
+        return _vaultAddr;
     }
 
     function startBlock() external view returns (uint256) {
         return _startBlock;
     }
 
-    function getPoolValue0() public view returns (uint256 value) {
-        PoolInfo memory poolInfo = poolInfos[0];
-        value = poolInfo.totalShare * poolInfo.discount / ONE;
-    }
-
-
-    function getAllPoolValue1() public view returns (uint256 allValue) {
-        for (uint256 i = 1; i < poolInfos.length; i++) {
-            allValue += getPoolValue1(i);
-        }
-    }
-
-    function getPoolValue1(uint256 pid) public view returns (uint256 value) {
-        PoolInfo memory poolInfo = poolInfos[pid];
-        value =  poolInfo.totalShare * poolInfo.discount / ONE * getPrice(pid) / ONE;
-    }
 
     // ============ POOL SETTINGS ========================================
-    function addPool(address tokenAddress, string memory symbol, uint256 discount, address oracleAddress) public onlyOwner {
+    function addPool(address tokenAddress, string memory symbol, uint256 allocPoint) public onlyOwner {
         require(tokenAddress != address(0), "tokenAddress is the zero address");
         updatePool();
-
         for (uint256 i = 0; i < poolInfos.length; i++) {
             PoolInfo memory poolInfo = poolInfos[i];
             require(address(poolInfo.token) != tokenAddress, "duplicate tokenAddress");
         }
-        lastRewardBlock = block.number > _startBlock ? block.number : _startBlock;
         PoolInfo memory newPoolInfo;
         newPoolInfo.token = IERC20(tokenAddress);
         newPoolInfo.symbol = symbol;
         newPoolInfo.decimal = IERC20(tokenAddress).decimals();
-        newPoolInfo.discount = discount;
-        newPoolInfo.oracleAddress = oracleAddress;
+        newPoolInfo.allocPoint = allocPoint;
+        newPoolInfo.lastRewardBlock = block.number > _startBlock ? block.number : _startBlock;
         poolInfos.push(newPoolInfo);
+
+        totalAllocPoints += allocPoint;
     }
 
-    function setPool(uint256 pid, address tokenAddress, uint256 discount, address oracleAddress) public onlyOwner {
+    function setPool(uint256 pid, address tokenAddress, uint256 allocPoint) public onlyOwner {
         PoolInfo storage poolInfo = poolInfos[pid];
+        totalAllocPoints -= poolInfo.allocPoint;
         poolInfo.token = IERC20(tokenAddress);
-        poolInfo.discount = discount;
-        poolInfo.oracleAddress = oracleAddress;
+        poolInfo.allocPoint = allocPoint;
+        totalAllocPoints += allocPoint;
     }
 
-    function updatePool() internal {
-        uint256 preBlockNumber = lastRewardBlock;
-        uint256 curBlockNumber = block.number;
-        if (curBlockNumber > preBlockNumber) {
-            uint256 delta = curBlockNumber - preBlockNumber;
 
-            if (poolInfos.length > 0) {
-                PoolInfo storage poolInfo = poolInfos[0];
-                if (poolInfo.totalShare > 0) poolInfo.accMarmotPerShare += marmotPerBlock0 * delta * ONE / poolInfo.totalShare;
-            }
-
-            if (poolInfos.length > 1) {
-                uint256 totalValue1 = getAllPoolValue1();
-                if (totalValue1 > 0) {
-                    for (uint256 i = 1; i < poolInfos.length; i++) {
-                        PoolInfo storage poolInfo1 = poolInfos[i];
-                        uint256 value1 = getPoolValue1(i);
-                        if (value1 > 0) poolInfo1.accMarmotPerShare += value1 * marmotPerBlock1 * delta * ONE / (totalValue1 * poolInfo1.totalShare);
-                    }
-                }
-            }
-            lastRewardBlock = curBlockNumber;
+    function updatePool() public {
+        for (uint256 i = 0; i < poolInfos.length; i++) {
+            updatePool(i);
         }
     }
 
+    function updatePool(uint256 pid) internal {
+        PoolInfo storage poolInfo = poolInfos[pid];
+        uint256 preBlockNumber = poolInfo.lastRewardBlock;
+        uint256 curBlockNumber = block.number;
+        if (curBlockNumber > preBlockNumber) {
+            uint256 delta = curBlockNumber - preBlockNumber;
+            if (poolInfo.allocPoint > 0 && poolInfo.totalShare > 0 && totalAllocPoints > 0) {
+                poolInfo.accMarmotPerShare += marmotPerBlock * delta * poolInfo.allocPoint * ONE / (poolInfo.totalShare * totalAllocPoints);
+                poolInfo.lastRewardBlock = curBlockNumber;
+            }
+        }
+    }
 
     function getPoolBalance(uint256 _pid) public view returns (uint256){
         PoolInfo memory poolInfo = poolInfos[_pid];
-        uint256 balance = poolInfo.token.balanceOf(address(this));
-        return balance;
+        return poolInfo.totalShare;
     }
 
 
     // ============ USER INTERACTION ========================================
     // Deposit staking tokens
     function deposit(uint256 pid, uint256 amount) public _lock_ notPause {
-        updatePool();
+        updatePool(pid);
         address user = msg.sender;
         PoolInfo storage poolInfo = poolInfos[pid];
         UserInfo storage userInfo = userInfos[pid][user];
@@ -212,13 +200,13 @@ contract MarmotPoolSimple is Ownable {
         if (userInfo.amount > 0) {
             uint256 pendingAmount = poolInfo.accMarmotPerShare * userInfo.amount / ONE - userInfo.rewardDebt;
             if (pendingAmount > 0) {
-                marmot.mint(_devAddr, pendingAmount/10);
+                marmot.mint(_vaultAddr, pendingAmount * FUND_RATIO / ONE);
                 marmot.mint(user, pendingAmount);
             }
         }
         if (amount > 0) {
-            amount = _deflationCompatibleSafeTransferFrom(poolInfo.token,user, address(this), amount);
-//            poolInfo.token.transferFrom(user, address(this), amount);
+            uint256 nativeAmount;
+            (nativeAmount, amount) = _deflationCompatibleSafeTransferFrom(poolInfo.token, user, address(this), amount);
             userInfo.amount += amount;
             poolInfo.totalShare += amount;
         }
@@ -227,8 +215,8 @@ contract MarmotPoolSimple is Ownable {
     }
 
     // Withdraw staking tokens
-    function withdraw(uint256 pid, uint256 amount) public _lock_ {
-        updatePool();
+    function withdraw(uint256 pid, uint256 amount) public _lock_ notPause {
+        updatePool(pid);
         address user = msg.sender;
         PoolInfo storage poolInfo = poolInfos[pid];
         UserInfo storage userInfo = userInfos[pid][user];
@@ -237,7 +225,7 @@ contract MarmotPoolSimple is Ownable {
         if (userInfo.amount > 0) {
             uint256 pendingAmount = poolInfo.accMarmotPerShare * userInfo.amount / ONE - userInfo.rewardDebt;
             if (pendingAmount > 0) {
-                marmot.mint(_devAddr, pendingAmount/10);
+                marmot.mint(_vaultAddr, pendingAmount * FUND_RATIO / ONE);
                 marmot.mint(user, pendingAmount);
             }
         }
@@ -246,26 +234,43 @@ contract MarmotPoolSimple is Ownable {
             poolInfo.totalShare -= amount;
             uint256 decimals = poolInfo.token.decimals();
             poolInfo.token.safeTransfer(user, amount.rescale(18, decimals));
-//            poolInfo.token.transfer(user, amount);
         }
         userInfo.rewardDebt = poolInfo.accMarmotPerShare * userInfo.amount / ONE;
         emit Withdraw(user, pid, amount);
     }
 
+    function claim(uint256 pid) external _lock_ notPause {
+        address user = msg.sender;
+        uint256 pendingAmount;
+        PoolInfo storage poolInfo = poolInfos[pid];
+        UserInfo storage userInfo = userInfos[pid][user];
+        if (userInfo.amount > 0 && poolInfo.allocPoint > 0) {
+            updatePool(pid);
+            pendingAmount += poolInfo.accMarmotPerShare * userInfo.amount / ONE - userInfo.rewardDebt;
+            userInfo.rewardDebt = poolInfo.accMarmotPerShare * userInfo.amount / ONE;
+        }
+        if (pendingAmount > 0) {
+            marmot.mint(_vaultAddr, pendingAmount * FUND_RATIO / ONE);
+            marmot.mint(user, pendingAmount);
+            emit Claim(user, pendingAmount);
+        }
+    }
+
+
     function claimAll() external _lock_ notPause {
-        updatePool();
         address user = msg.sender;
         uint256 pendingAmount;
         for (uint256 i = 0; i < poolInfos.length; i++) {
                 PoolInfo storage poolInfo = poolInfos[i];
                 UserInfo storage userInfo = userInfos[i][user];
-                if (userInfo.amount > 0) {
+                if (userInfo.amount > 0 && poolInfo.allocPoint > 0) {
+                    updatePool(i);
                     pendingAmount += poolInfo.accMarmotPerShare * userInfo.amount / ONE - userInfo.rewardDebt;
                     userInfo.rewardDebt = poolInfo.accMarmotPerShare * userInfo.amount / ONE;
                 }
         }
         if (pendingAmount > 0) {
-            marmot.mint(_devAddr, pendingAmount/10);
+            marmot.mint(_vaultAddr, pendingAmount * FUND_RATIO / ONE);
             marmot.mint(user, pendingAmount);
             emit Claim(user, pendingAmount);
         }
@@ -274,35 +279,19 @@ contract MarmotPoolSimple is Ownable {
     function pendingAll() view external returns (uint256) {
         address user = msg.sender;
         uint256 pendingAmount;
-        for (uint256 i = 0; i < poolInfos.length; i++) {
-                PoolInfo memory poolInfo = poolInfos[i];
-                UserInfo memory userInfo = userInfos[i][user];
-                if (userInfo.amount > 0) {
-                    pendingAmount += poolInfo.accMarmotPerShare * userInfo.amount / ONE - userInfo.rewardDebt;
-                }
-        }
-
-        uint256 delta = block.number - lastRewardBlock;
-        uint256 addMarmotPerShare;
-        uint256 totalValue1;
-        if (poolInfos.length >= 1) totalValue1 = getAllPoolValue1();
-
+        uint256 curBlockNumber = block.number;
         for (uint256 i = 0; i < poolInfos.length; i++) {
             PoolInfo memory poolInfo = poolInfos[i];
             UserInfo memory userInfo = userInfos[i][user];
-            if (i == 0) {
-                if (poolInfo.totalShare > 0) {
-                    addMarmotPerShare = marmotPerBlock0 * delta * ONE / poolInfo.totalShare;
+            if (userInfo.amount > 0) {
+                pendingAmount += poolInfo.accMarmotPerShare * userInfo.amount / ONE - userInfo.rewardDebt;
+                if (curBlockNumber > poolInfo.lastRewardBlock && poolInfo.totalShare * totalAllocPoints > 0) {
+                    uint256 delta = curBlockNumber - poolInfo.lastRewardBlock;
+                    uint256 addMarmotPerShare = marmotPerBlock * delta * poolInfo.allocPoint * ONE / (poolInfo.totalShare * totalAllocPoints);
                     pendingAmount += addMarmotPerShare * userInfo.amount / ONE;
                 }
             }
-            else {
-                uint256 value1 = getPoolValue1(i);
-                if (value1 > 0 && totalValue1 >0) {
-                    addMarmotPerShare = value1 * marmotPerBlock1 * delta * ONE / (totalValue1 * poolInfo.totalShare);
-                    pendingAmount += addMarmotPerShare * userInfo.amount / ONE;
-                }
-            }
+            console.log('pendingAmount', i, pendingAmount);
         }
         return pendingAmount;
     }
@@ -310,30 +299,18 @@ contract MarmotPoolSimple is Ownable {
     function pending(uint256 pid, address user) view public returns (uint256) {
         PoolInfo memory poolInfo = poolInfos[pid];
         UserInfo memory userInfo = userInfos[pid][user];
-        uint256 pendingAmount;
-        if (userInfo.amount > 0) {
-            pendingAmount = poolInfo.accMarmotPerShare * userInfo.amount / ONE - userInfo.rewardDebt;
+        uint256 curBlockNumber = block.number;
+        uint256 accMarmotPerShare = poolInfo.accMarmotPerShare;
+        if (curBlockNumber > poolInfo.lastRewardBlock && poolInfo.totalShare * totalAllocPoints > 0) {
+            uint256 delta = curBlockNumber - poolInfo.lastRewardBlock;
+            accMarmotPerShare += marmotPerBlock * delta * poolInfo.allocPoint * ONE / (poolInfo.totalShare * totalAllocPoints);
         }
-        uint256 delta = block.number - lastRewardBlock;
-        if (pid == 0) {
-            if (poolInfo.totalShare > 0) {
-                uint256 addMarmotPerShare = marmotPerBlock0 * delta * ONE / poolInfo.totalShare;
-                pendingAmount += addMarmotPerShare * userInfo.amount / ONE;
-            }
-        } else {
-            uint256 totalValue1 = getAllPoolValue1();
-            uint256 value1 = getPoolValue1(pid);
-            if (value1 > 0) {
-                uint256 addMarmotPerShare = value1 * marmotPerBlock1 * delta * ONE / (totalValue1 * poolInfo.totalShare);
-                pendingAmount += addMarmotPerShare * userInfo.amount / ONE;
-            }
-        }
-        return pendingAmount;
+        return accMarmotPerShare * userInfo.amount / ONE - userInfo.rewardDebt;
     }
 
 
     // Withdraw without caring about rewards. EMERGENCY ONLY.
-    function emergencyWithdraw(uint256 pid) public notPause _lock_ {
+    function emergencyWithdraw(uint256 pid) public _lock_ {
         _emergencyWithdraw(pid, msg.sender);
     }
 
@@ -345,19 +322,18 @@ contract MarmotPoolSimple is Ownable {
         userInfo.rewardDebt = 0;
         uint256 decimals = poolInfo.token.decimals();
         poolInfo.token.safeTransfer(user, amount.rescale(18, decimals));
-//        poolInfo.token.transfer(user, amount);
         poolInfo.totalShare -= amount;
         emit EmergencyWithdraw(user, pid, amount);
     }
 
 
     function _deflationCompatibleSafeTransferFrom(IERC20 token, address from, address to, uint256 amount)
-        internal returns (uint256) {
+        internal returns (uint256, uint256) {
         uint256 decimals = token.decimals();
         uint256 balance1 = token.balanceOf(to);
         token.safeTransferFrom(from, to, amount.rescale(18, decimals));
         uint256 balance2 = token.balanceOf(to);
-        return (balance2 - balance1).rescale(decimals, 18);
+        return (balance2 - balance1, (balance2 - balance1).rescale(decimals, 18));
     }
 
 

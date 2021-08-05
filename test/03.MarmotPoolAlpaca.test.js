@@ -108,6 +108,7 @@ describe('MarmotPool', function () {
         marmot = await (await ethers.getContractFactory('MarmotToken')).deploy()
         await marmot.addMinter(deployer.address)
         marmot.mint(deployer.address, decimalStr("200"))
+        await marmot.delMinter(deployer.address)
 
         const unifactory = await (await ethers.getContractFactory('UniswapV2Factory')).deploy(deployer.address)
         const unirouter = await (await ethers.getContractFactory('UniswapV2Router02')).deploy(unifactory.address, ZERO_ADDRESS)
@@ -156,7 +157,7 @@ describe('MarmotPool', function () {
             marmot.address,
             decimalStr("10"),
             decimalStr("15"),
-            100
+            11180847
         )
         await pool.setAlpacaFairLaunch(alpacaFairLaunchAddrees)
         await pool.setWrappedNativeAddr(wbnbAddress)
@@ -210,18 +211,29 @@ describe('MarmotPool', function () {
     })
 
     it('marmot distribution correctly', async function () {
+        await console.log('lastRewardBlock1', await pool.lastRewardBlock())
         await pool.connect(deployer).deposit(0, decimalStr("50"))
         await pool.connect(alice).deposit(0, decimalStr("50"))
+        await console.log('lastRewardBlock2', await pool.lastRewardBlock())
+        await console.log('blockNumber2', await pool.blockNumber())
         expect((await pool.getUserInfo(0, deployer.address)).amount).to.equal(decimalStr("50"))
         expect((await pool.getUserInfo(0, alice.address)).amount).to.equal(decimalStr("50"))
         expect((await pool.getPoolInfo(0)).totalShare).to.equal(decimalStr("100"))
-        fastMove(10)
+        fastMove(50)
+        await console.log('pendingALL', await pool.pendingAll())
+        await console.log('pending', await pool.pending(0, deployer.address))
         console.log('deployer pending', (await pool.connect(deployer).pendingAll()).toString())
         console.log('alice pending', (await pool.connect(alice).pendingAll()).toString())
         await pool.connect(deployer).claimAll();
+        await console.log('lastRewardBlock3', await pool.lastRewardBlock())
+        await console.log('blockNumber3', await pool.blockNumber())
         await pool.connect(alice).claimAll();
+        await console.log('lastRewardBlock4', await pool.lastRewardBlock())
+        await console.log('blockNumber4', await pool.blockNumber())
         console.log('deployer marmot', (await marmot.balanceOf(deployer.address)).toString())
         console.log('alice marmot', (await marmot.balanceOf(alice.address)).toString())
+
+
 
         await pool.withdraw(0, decimalStr("50"))
         await pool.connect(alice).withdraw(0, decimalStr("50"))
@@ -230,54 +242,55 @@ describe('MarmotPool', function () {
     })
 
 
-    it('deposit/withdraw correctly', async function () {
-        expect(await pool.getPoolLength()).to.equal(3)
-        await expect(pool.deposit(2, decimalStr("0.01"))).to.be.revertedWith("MP: baseToken is wNative")
-
-        await pool.connect(deployer).deposit(2, decimalStr("100"), {value: decimalStr("100")}) //WBNB
-        expect((await pool.getUserInfo(2, deployer.address)).amount).to.equal(decimalStr("100"))
-        expect((await pool.getPoolInfo(2)).totalShare).to.equal(decimalStr("100"))
-        await pool.withdraw(2, decimalStr("100"))
-        expect((await pool.getUserInfo(2, deployer.address)).amount).to.equal(decimalStr("0"))
-        expect((await pool.getPoolInfo(2)).totalShare).to.equal(decimalStr("0"))
-    })
-
-    it('alpaca interaction', async function () {
-        console.log('alpaca balance bef', await alpaca.balanceOf(pool.address))
-        await pool.alpacaHarvestAll()
-        console.log('alpaca balance aft', await alpaca.balanceOf(pool.address))
-        console.log("pool busd balance aft", await busd.balanceOf(pool.address))
-        console.log("pool bnb balance aft", await ethers.provider.getBalance(pool.address))
-        await pool.buyBackAndBurn(alpaca.address, swapperALPACA.address, 0)
-
-    })
-
-    it('emergency withdraw', async function () {
-        await pool.connect(deployer).deposit(0, decimalStr("50"))
-        await pool.connect(alice).deposit(0, decimalStr("50"))
-        fastMove(10)
-        await pool.emergencyWithdraw(0)
-        await pool.connect(alice).emergencyWithdraw(0)
-        expect((await pool.getUserInfo(0, deployer.address)).amount).to.equal(decimalStr("0"))
-        expect((await pool.getUserInfo(0, alice.address)).amount).to.equal(decimalStr("0"))
-        expect((await busd.balanceOf(alice.address))).to.equal(decimalStr("50"))
-    })
-
-
-    it('pause works correctly', async function () {
-        await pool.connect(deployer).deposit(0, decimalStr("50"))
-        await pool.connect(alice).deposit(0, decimalStr("50"))
-        fastMove(10)
-        await pool.togglePause()
-        await expect(pool.withdraw(0, decimalStr("50"))).to.be.revertedWith("MP: farming suspended")
-
-    })
-
-    it('check marmot vote', async function () {
-        console.log("deployer marmot", await marmot.balanceOf(deployer.address))
-        console.log("deployer marmot vote", await marmot.getCurrentVotes(deployer.address))
-        console.log("minter", await marmot.getMinter(0), pool.address)
-    })
+    // it('deposit/withdraw correctly', async function () {
+    //     expect(await pool.getPoolLength()).to.equal(3)
+    //     await expect(pool.deposit(2, decimalStr("0.01"))).to.be.revertedWith("MP: baseToken is wNative")
+    //
+    //     await pool.connect(deployer).deposit(2, decimalStr("100"), {value: decimalStr("100")}) //WBNB
+    //     expect((await pool.getUserInfo(2, deployer.address)).amount).to.equal(decimalStr("100"))
+    //     expect((await pool.getPoolInfo(2)).totalShare).to.equal(decimalStr("100"))
+    //     await pool.withdraw(2, decimalStr("100"))
+    //     expect((await pool.getUserInfo(2, deployer.address)).amount).to.equal(decimalStr("0"))
+    //     expect((await pool.getPoolInfo(2)).totalShare).to.equal(decimalStr("0"))
+    // })
+    //
+    // it('alpaca interaction', async function () {
+    //     console.log('alpaca balance bef', await alpaca.balanceOf(pool.address))
+    //     await pool.alpacaHarvestAll()
+    //     console.log('alpaca balance aft', await alpaca.balanceOf(pool.address))
+    //     console.log("pool busd balance aft", await busd.balanceOf(pool.address))
+    //     console.log("pool bnb balance aft", await ethers.provider.getBalance(pool.address))
+    //     await pool.buyBackAndBurn(alpaca.address, swapperALPACA.address, 0)
+    //
+    // })
+    //
+    // it('emergency withdraw', async function () {
+    //     await pool.connect(deployer).deposit(0, decimalStr("50"))
+    //     await pool.connect(alice).deposit(0, decimalStr("50"))
+    //     fastMove(10)
+    //     await pool.emergencyWithdraw(0)
+    //     await pool.connect(alice).emergencyWithdraw(0)
+    //     expect((await pool.getUserInfo(0, deployer.address)).amount).to.equal(decimalStr("0"))
+    //     expect((await pool.getUserInfo(0, alice.address)).amount).to.equal(decimalStr("0"))
+    //     expect((await busd.balanceOf(alice.address))).to.equal(decimalStr("50"))
+    // })
+    //
+    //
+    // it('pause works correctly', async function () {
+    //     await pool.connect(deployer).deposit(0, decimalStr("50"))
+    //     await pool.connect(alice).deposit(0, decimalStr("50"))
+    //     fastMove(10)
+    //     await pool.togglePause()
+    //     await expect(pool.withdraw(0, decimalStr("50"))).to.be.revertedWith("MP: farming suspended")
+    //
+    // })
+    //
+    // it('check marmot vote', async function () {
+    //     console.log("deployer marmot", await marmot.balanceOf(deployer.address))
+    //     console.log("deployer marmot vote", await marmot.getCurrentVotes(deployer.address))
+    //     console.log("minter", await marmot.getMinter(0), pool.address)
+    //
+    // })
 
 
 })
